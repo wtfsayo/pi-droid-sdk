@@ -68,6 +68,8 @@ describe("discoverModels", () => {
 						supportedReasoningEfforts: [ReasoningEffort.Off, ReasoningEffort.High],
 						defaultReasoningEffort: ReasoningEffort.High,
 						isCustom: false,
+						contextWindow: 300000,
+						maxOutputTokens: 32000,
 					},
 				],
 			},
@@ -76,7 +78,7 @@ describe("discoverModels", () => {
 
 		const models = await discoverModels();
 		expect(models).toEqual([
-			expect.objectContaining({ id: "kimi-k2.5", name: "Droid Core (Kimi K2.5)" }),
+			expect.objectContaining({ id: "kimi-k2.5", name: "Droid Core (Kimi K2.5)", contextWindow: 300000, maxTokens: 32000 }),
 		]);
 		expect(mockedCreateSession).toHaveBeenCalled();
 	});
@@ -97,5 +99,9 @@ describe("mapPiThinkingToReasoningEffort", () => {
 
 	it("returns metadata for discovered models", () => {
 		expect(getDroidModelMetadata("kimi-k2.5")?.displayName).toContain("Kimi");
+	});
+
+	it("redacts API keys from discovery errors", () => {
+		expect(__testUtils.scrubDiscoveryErrorText("bad token factory-secret", "factory-secret")).toBe("bad token [redacted]");
 	});
 });

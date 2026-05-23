@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
 	createSdkMcpServer,
 	tool,
@@ -17,9 +17,12 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { z } from "zod";
 import { buildDroidPiBridgeMcpToolDescription, DROID_PI_BRIDGE_MCP_TOOL_PREFIX } from "./droid-bridge-contract.js";
+import { isDroidNativeToolDisplayToolName } from "./droid-native-tool-display.js";
 
 const DROID_PI_TOOL_BRIDGE_ENV = "PI_DROID_PI_TOOL_BRIDGE";
 const DROID_PI_TOOL_BRIDGE_BUILTINS_ENV = "PI_DROID_EXPOSE_BUILTIN_TOOLS";
+const DROID_PI_TOOL_BRIDGE_DEBUG_ENV = "PI_DROID_PI_TOOL_BRIDGE_DEBUG";
+const DROID_PI_TOOL_BRIDGE_DIAGNOSTIC_PREFIX = "[pi-droid-sdk:bridge]";
 const DISABLED_ENV_VALUES = new Set(["0", "false", "off", "none", "no", "disabled"]);
 const ENABLED_ENV_VALUES = new Set(["1", "true", "on", "yes", "enabled"]);
 const OVERLAPPING_DROID_NATIVE_PI_BUILTIN_TOOL_NAMES = new Set(["read", "bash", "write", "edit", "grep", "find", "ls"]);
@@ -36,6 +39,7 @@ export interface DroidPiBridgeToolRequest {
 export interface DroidPiToolBridgeRun {
 	id: string;
 	enabled: boolean;
+	surfaceSignature: string;
 	mcpServers: DroidMcpServerConfig[];
 	sdkServer: SdkMcpServer;
 	takeQueuedToolRequests(): DroidPiBridgeToolRequest[];
@@ -48,6 +52,20 @@ export interface DroidPiToolBridgeRun {
 
 export interface DroidPiToolBridgeRunOptions {
 	onToolRequest?: (request: DroidPiBridgeToolRequest) => void;
+}
+
+export interface DroidPiToolBridgeSnapshotEntry {
+	piToolName: string;
+	mcpToolName: string;
+	description: string;
+	inputSchema: unknown;
+	toolInfo: ToolInfo;
+}
+
+export interface DroidPiToolBridgeSnapshot {
+	tools: DroidPiToolBridgeSnapshotEntry[];
+	mcpToolNameToPiToolName: Map<string, string>;
+	piToolNameToMcpToolName: Map<string, string>;
 }
 
 export interface DroidPiToolBridge {
@@ -87,8 +105,41 @@ function resolveExposeOverlappingBuiltins(env: Record<string, string | undefined
 	return resolveEnvFlag(env[DROID_PI_TOOL_BRIDGE_BUILTINS_ENV], false);
 }
 
+function resolveBridgeDiagnosticsEnabled(env: Record<string, string | undefined> = process.env): boolean {
+	return resolveEnvFlag(env[DROID_PI_TOOL_BRIDGE_DEBUG_ENV], false);
+}
+
+function emitBridgeDiagnostic(env: Record<string, string | undefined>, event: Record<string, unknown>): void {
+	if (!resolveBridgeDiagnosticsEnabled(env)) return;
+	const safeEvent = Object.fromEntries(
+		Object.entries(event).filter(([, value]) => value === null || ["string", "number", "boolean", "undefined"].includes(typeof value)),
+	);
+	process.stderr.write(`${DROID_PI_TOOL_BRIDGE_DIAGNOSTIC_PREFIX} ${JSON.stringify(safeEvent)}\n`);
+}
+
+function stableNameSuffix(value: string): string {
+	return createHash("sha256").update(value).digest("hex").slice(0, 8);
+}
+
 function toMcpToolName(piToolName: string): string {
-	return `${DROID_PI_BRIDGE_MCP_TOOL_PREFIX}${piToolName.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+	const sanitized = piToolName.replace(/[^a-zA-Z0-9_-]/g, "_").replace(/^_+|_+$/g, "") || "tool";
+	return `${DROID_PI_BRIDGE_MCP_TOOL_PREFIX}${sanitized}`;
+}
+
+function dedupeMcpToolName(baseName: string, piToolName: string, usedNames: Set<string>): string {
+	if (!usedNames.has(baseName)) {
+		usedNames.add(baseName);
+		return baseName;
+	}
+	const suffix = stableNameSuffix(piToolName);
+	let candidate = `${baseName}__${suffix}`;
+	let counter = 2;
+	while (usedNames.has(candidate)) {
+		candidate = `${baseName}__${suffix}_${counter}`;
+		counter += 1;
+	}
+	usedNames.add(candidate);
+	return candidate;
 }
 
 function jsonSchemaToZodShape(schema: Record<string, unknown>): Record<string, z.ZodTypeAny> {
@@ -121,12 +172,56 @@ function toolResultEventToMessage(event: ToolResultEvent): ToolResultMessage {
 	};
 }
 
+export function buildDroidPiToolBridgeSnapshot(
+	pi: DroidPiToolBridgeSnapshotApi,
+	options: { exposeOverlappingBuiltins?: boolean } = {},
+): DroidPiToolBridgeSnapshot {
+	const active = new Set(pi.getActiveTools());
+	const exposeBuiltins = options.exposeOverlappingBuiltins ?? resolveExposeOverlappingBuiltins();
+	const usedMcpToolNames = new Set<string>();
+	const mcpToolNameToPiToolName = new Map<string, string>();
+	const piToolNameToMcpToolName = new Map<string, string>();
+	const tools: DroidPiToolBridgeSnapshotEntry[] = [];
+
+	for (const toolInfo of pi.getAllTools()) {
+		if (!active.has(toolInfo.name)) continue;
+		if (isDroidNativeToolDisplayToolName(toolInfo.name)) continue;
+		if (toolInfo.name.startsWith(DROID_PI_BRIDGE_MCP_TOOL_PREFIX)) continue;
+		if (!exposeBuiltins && OVERLAPPING_DROID_NATIVE_PI_BUILTIN_TOOL_NAMES.has(toolInfo.name)) continue;
+
+		const mcpToolName = dedupeMcpToolName(toMcpToolName(toolInfo.name), toolInfo.name, usedMcpToolNames);
+		mcpToolNameToPiToolName.set(mcpToolName, toolInfo.name);
+		piToolNameToMcpToolName.set(toolInfo.name, mcpToolName);
+		tools.push({
+			piToolName: toolInfo.name,
+			mcpToolName,
+			description: toolInfo.description,
+			inputSchema: toolInfo.parameters,
+			toolInfo,
+		});
+	}
+
+	return { tools, mcpToolNameToPiToolName, piToolNameToMcpToolName };
+}
+
+export function buildDroidPiToolBridgeSurfaceSignature(snapshot: DroidPiToolBridgeSnapshot): string {
+	const material = snapshot.tools.map((entry) => ({
+		piToolName: entry.piToolName,
+		mcpToolName: entry.mcpToolName,
+		description: entry.description,
+		inputSchema: entry.inputSchema,
+	}));
+	return createHash("sha256").update(JSON.stringify(material)).digest("hex");
+}
+
 class DroidPiToolBridgeRunImpl implements DroidPiToolBridgeRun {
 	readonly id = randomUUID();
 	readonly enabled: boolean;
+	readonly surfaceSignature: string;
 	readonly sdkServer: SdkMcpServer;
 	readonly mcpServers: DroidMcpServerConfig[];
 	private readonly onToolRequest?: (request: DroidPiBridgeToolRequest) => void;
+	private readonly env: Record<string, string | undefined>;
 	private readonly pendingByPiToolCallId = new Map<string, PendingBridgeCall>();
 	private readonly queuedRequests: DroidPiBridgeToolRequest[] = [];
 	private readonly mcpToolNameToPiToolName = new Map<string, string>();
@@ -135,30 +230,39 @@ class DroidPiToolBridgeRunImpl implements DroidPiToolBridgeRun {
 
 	constructor(options: {
 		enabled: boolean;
-		tools: ToolInfo[];
+		snapshot: DroidPiToolBridgeSnapshot;
+		env: Record<string, string | undefined>;
 		onToolRequest?: (request: DroidPiBridgeToolRequest) => void;
 	}) {
 		this.enabled = options.enabled;
+		this.surfaceSignature = buildDroidPiToolBridgeSurfaceSignature(options.snapshot);
 		this.onToolRequest = options.onToolRequest;
+		this.env = options.env;
 
-		const droidTools = options.tools.map((toolInfo) => {
-			const mcpToolName = toMcpToolName(toolInfo.name);
-			this.mcpToolNameToPiToolName.set(mcpToolName, toolInfo.name);
-			const inputSchema = jsonSchemaToZodShape(toolInfo.parameters as Record<string, unknown>);
+		const droidTools = options.snapshot.tools.map((snapshotTool) => {
+			this.mcpToolNameToPiToolName.set(snapshotTool.mcpToolName, snapshotTool.piToolName);
+			const inputSchema = jsonSchemaToZodShape(snapshotTool.inputSchema as Record<string, unknown>);
 			return tool(
-				mcpToolName,
+				snapshotTool.mcpToolName,
 				buildDroidPiBridgeMcpToolDescription({
-					piToolName: toolInfo.name,
-					mcpToolName,
-					piToolDescription: toolInfo.description,
+					piToolName: snapshotTool.piToolName,
+					mcpToolName: snapshotTool.mcpToolName,
+					piToolDescription: snapshotTool.description,
 				}),
 				inputSchema,
-				(input) => this.enqueueToolRequest(mcpToolName, toolInfo.name, input),
+				(input) => this.enqueueToolRequest(snapshotTool.mcpToolName, snapshotTool.piToolName, input),
 			);
 		});
 
 		this.sdkServer = createSdkMcpServer({ name: "pi_tools", tools: droidTools });
 		this.mcpServers = [this.sdkServer];
+		emitBridgeDiagnostic(this.env, {
+			event: "run_created",
+			runId: this.id,
+			enabled: this.enabled,
+			exposedToolCount: droidTools.length,
+			surfaceSignature: this.surfaceSignature,
+		});
 	}
 
 	takeQueuedToolRequests(): DroidPiBridgeToolRequest[] {
@@ -173,6 +277,14 @@ class DroidPiToolBridgeRunImpl implements DroidPiToolBridgeRun {
 			if (!pending || pending.settled) continue;
 			pending.settled = true;
 			this.pendingByPiToolCallId.delete(toolResult.toolCallId);
+			emitBridgeDiagnostic(this.env, {
+				event: "request_resolved",
+				runId: this.id,
+				piToolCallId: toolResult.toolCallId,
+				piToolName: toolResult.toolName,
+				isError: toolResult.isError === true,
+				pendingCount: this.pendingByPiToolCallId.size,
+			});
 			pending.resolve(toolResultToText(toolResult));
 		}
 	}
@@ -206,6 +318,12 @@ class DroidPiToolBridgeRunImpl implements DroidPiToolBridgeRun {
 		this.disposed = true;
 		this.cancel("Droid pi tool bridge run disposed");
 		await this.sdkServer.close();
+		emitBridgeDiagnostic(this.env, {
+			event: "run_disposed",
+			runId: this.id,
+			enabled: this.enabled,
+			pendingCount: this.pendingByPiToolCallId.size,
+		});
 	}
 
 	private enqueueToolRequest(mcpToolName: string, piToolName: string, args: Record<string, unknown>): Promise<string> {
@@ -224,6 +342,15 @@ class DroidPiToolBridgeRunImpl implements DroidPiToolBridgeRun {
 		return new Promise<string>((resolve, reject) => {
 			const pending: PendingBridgeCall = { request, resolve, reject, settled: false };
 			this.pendingByPiToolCallId.set(request.piToolCallId, pending);
+			emitBridgeDiagnostic(this.env, {
+				event: "request_queued",
+				runId: this.id,
+				bridgeCallId: request.bridgeCallId,
+				piToolCallId: request.piToolCallId,
+				mcpToolName,
+				piToolName,
+				pendingCount: this.pendingByPiToolCallId.size,
+			});
 			if (this.onToolRequest) {
 				this.onToolRequest(request);
 			} else {
@@ -258,23 +385,21 @@ class DroidPiToolBridgeRegistry implements DroidPiToolBridge {
 		return resolveDroidPiToolBridgeEnabled(this.env);
 	}
 
-	private buildSnapshot(): ToolInfo[] {
-		const active = new Set(this.pi.getActiveTools());
-		const exposeBuiltins = resolveExposeOverlappingBuiltins(this.env);
-		return this.pi.getAllTools().filter((toolInfo) => {
-			if (!active.has(toolInfo.name)) return false;
-			if (toolInfo.name.startsWith(DROID_PI_BRIDGE_MCP_TOOL_PREFIX)) return false;
-			if (!exposeBuiltins && OVERLAPPING_DROID_NATIVE_PI_BUILTIN_TOOL_NAMES.has(toolInfo.name)) return false;
-			return true;
+	private buildSnapshot(): DroidPiToolBridgeSnapshot {
+		return buildDroidPiToolBridgeSnapshot(this.pi, {
+			exposeOverlappingBuiltins: resolveExposeOverlappingBuiltins(this.env),
 		});
 	}
 
 	async createRun(options: DroidPiToolBridgeRunOptions = {}): Promise<DroidPiToolBridgeRun> {
 		const enabled = this.isEnabled();
-		const tools = enabled ? this.buildSnapshot() : [];
+		const snapshot = enabled
+			? this.buildSnapshot()
+			: { tools: [], mcpToolNameToPiToolName: new Map(), piToolNameToMcpToolName: new Map() };
 		const run = new DroidPiToolBridgeRunImpl({
-			enabled: enabled && tools.length > 0,
-			tools,
+			enabled: enabled && snapshot.tools.length > 0,
+			snapshot,
+			env: this.env,
 			onToolRequest: options.onToolRequest,
 		});
 		this.runs.add(run);
@@ -298,7 +423,16 @@ export function registerDroidPiToolBridge(pi: DroidPiToolBridgeExtensionApi): vo
 }
 
 export const __testUtils = {
+	DROID_PI_TOOL_BRIDGE_DIAGNOSTIC_PREFIX,
 	resolveDroidPiToolBridgeEnabled,
 	resolveExposeOverlappingBuiltins,
+	resolveBridgeDiagnosticsEnabled,
 	toMcpToolName,
+	createRegistry(pi: DroidPiToolBridgeExtensionApi, env: Record<string, string | undefined> = process.env): DroidPiToolBridge {
+		return new DroidPiToolBridgeRegistry(pi, env);
+	},
+	async resetRegisteredBridgeForTests(): Promise<void> {
+		await registeredBridge?.disposeAll("test reset");
+		registeredBridge = undefined;
+	},
 };

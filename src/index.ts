@@ -1,9 +1,12 @@
 import type { ExtensionAPI, ExtensionContext, ProviderConfig, ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import { discoverModels, type DroidModelFallbackIssue } from "./model-discovery.js";
 import { registerDroidPiToolBridge } from "./droid-pi-tool-bridge.js";
+import { registerDroidNativeToolDisplay } from "./droid-native-tool-display.js";
 import { registerDroidQuestionTool } from "./droid-question-tool.js";
 import { registerDroidSessionCwd } from "./droid-session-cwd.js";
 import { setDroidAskUserUiContext } from "./droid-ask-user.js";
+import { setDroidPermissionUiContext } from "./droid-permissions.js";
+import { registerDroidControls } from "./droid-state.js";
 import { streamDroid } from "./droid-provider.js";
 
 type DroidExtensionApi =
@@ -16,6 +19,8 @@ type DroidExtensionApi =
 		on(event: "session_start", handler: (event: unknown, ctx: ExtensionContext) => Promise<void> | void): void;
 	}
 	& Parameters<typeof registerDroidSessionCwd>[0]
+	& Parameters<typeof registerDroidControls>[0]
+	& Parameters<typeof registerDroidNativeToolDisplay>[0]
 	& Parameters<typeof registerDroidQuestionTool>[0]
 	& Parameters<typeof registerDroidPiToolBridge>[0];
 
@@ -36,11 +41,14 @@ function registerDroidProvider(pi: Pick<ExtensionAPI, "registerProvider">, model
 
 export default async function (pi: DroidExtensionApi) {
 	registerDroidSessionCwd(pi);
+	registerDroidControls(pi);
+	registerDroidNativeToolDisplay(pi);
 	registerDroidQuestionTool(pi);
 	registerDroidPiToolBridge(pi);
 
 	pi.on("session_start", (_event, ctx) => {
 		setDroidAskUserUiContext({ hasUI: ctx.hasUI, ui: ctx.ui });
+		setDroidPermissionUiContext({ hasUI: ctx.hasUI, ui: ctx.ui });
 	});
 
 	let fallbackIssue: DroidModelFallbackIssue | undefined;

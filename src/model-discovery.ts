@@ -35,6 +35,7 @@ export interface DroidModelMetadata {
 	defaultReasoningEffort: ReasoningEffort;
 	supportedReasoningEfforts: ReasoningEffort[];
 	contextWindow: number;
+	maxTokens: number;
 	noImageSupport: boolean;
 	isCustom: boolean;
 	tokenMultiplier?: number;
@@ -124,18 +125,45 @@ function buildThinkingLevelMap(supported: ReasoningEffort[]): ThinkingLevelMap |
 	};
 }
 
+function getNumericField(item: object, fieldNames: string[]): number | undefined {
+	const record = item as Record<string, unknown>;
+	for (const fieldName of fieldNames) {
+		const value = record[fieldName];
+		if (typeof value === "number" && Number.isFinite(value) && value > 0) return Math.floor(value);
+		if (typeof value === "string") {
+			const parsed = Number(value);
+			if (Number.isFinite(parsed) && parsed > 0) return Math.floor(parsed);
+		}
+	}
+	return undefined;
+}
+
+function getStringField(item: object, fieldNames: string[]): string | undefined {
+	const record = item as Record<string, unknown>;
+	for (const fieldName of fieldNames) {
+		const value = record[fieldName];
+		if (typeof value === "string" && value.trim()) return value.trim();
+	}
+	return undefined;
+}
+
 function toMetadata(item: AvailableModelConfig): DroidModelMetadata {
 	const baseModelId = item.modelId ?? item.id;
 	const thinkingLevelMap = buildThinkingLevelMap(item.supportedReasoningEfforts);
+	const contextWindow = getNumericField(item, ["contextWindow", "context_window", "maxInputTokens", "max_input_tokens"])
+		?? FALLBACK_CONTEXT_WINDOW;
+	const maxTokens = getNumericField(item, ["maxTokens", "maxOutputTokens", "max_output_tokens"])
+		?? FALLBACK_MAX_TOKENS;
 	return {
 		piModelId: baseModelId,
 		baseModelId,
-		displayName: item.displayName,
+		displayName: item.displayName || getStringField(item, ["shortDisplayName", "name"]) || baseModelId,
 		supportsReasoning: thinkingLevelMap !== undefined,
 		...(thinkingLevelMap ? { thinkingLevelMap } : {}),
 		defaultReasoningEffort: item.defaultReasoningEffort,
 		supportedReasoningEfforts: item.supportedReasoningEfforts,
-		contextWindow: FALLBACK_CONTEXT_WINDOW,
+		contextWindow,
+		maxTokens,
 		noImageSupport: item.noImageSupport === true,
 		isCustom: item.isCustom === true,
 		...(item.tokenMultiplier !== undefined ? { tokenMultiplier: item.tokenMultiplier } : {}),
@@ -153,14 +181,17 @@ function toProviderModelConfig(metadata: DroidModelMetadata): ProviderModelConfi
 		input,
 		cost: ZERO_COST,
 		contextWindow: metadata.contextWindow,
-		maxTokens: FALLBACK_MAX_TOKENS,
+		maxTokens: metadata.maxTokens,
 	};
 }
 
 function registerMetadata(entries: DroidModelMetadata[]): ProviderModelConfig[] {
 	metadataByPiModelId.clear();
 	const models: ProviderModelConfig[] = [];
+	const usedIds = new Set<string>();
 	for (const entry of entries) {
+		if (!entry.piModelId || usedIds.has(entry.piModelId)) continue;
+		usedIds.add(entry.piModelId);
 		metadataByPiModelId.set(entry.piModelId, entry);
 		models.push(toProviderModelConfig(entry));
 	}
@@ -178,6 +209,7 @@ function fallbackMetadataFromSnapshot(): DroidModelMetadata[] {
 		defaultReasoningEffort: item.defaultReasoningEffort,
 		supportedReasoningEfforts: item.supportedReasoningEfforts,
 		contextWindow: FALLBACK_CONTEXT_WINDOW,
+		maxTokens: FALLBACK_MAX_TOKENS,
 		noImageSupport: item.noImageSupport === true,
 		isCustom: item.isCustom === true,
 		...(item.tokenMultiplier !== undefined ? { tokenMultiplier: item.tokenMultiplier } : {}),
@@ -220,9 +252,28 @@ function missingApiKeyIssue(): DroidModelFallbackIssue {
 	};
 }
 
-function discoveryFailedIssue(error: unknown): DroidModelFallbackIssue {
-	const errorMessage = error instanceof Error ? error.message : String(error);
-	const reason: DroidModelFallbackReason = errorMessage.includes("ENOENT") || errorMessage.includes("spawn")
+function escapeRegExp(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function scrubDiscoveryErrorText(text: string, apiKey?: string): string {
+	let scrubbed = text;
+	const trimmedKey = apiKey?.trim();
+	if (trimmedKey) scrubbed = scrubbed.replace(new RegExp(escapeRegExp(trimmedKey), "g"), "[redacted]");
+	return scrubbed
+		.replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
+		.replace(/((?:^|[\s,{])cookie["']?\s*[:=]\s*["']?)[^\n]+/gi, "$1[redacted]")
+		.replace(
+			/((?:authorization|api[_-]?key|apiKey|token|session(?:[_-]?id)?)['"]?\s*[:=]\s*['"]?)[^"'\s,;}]+/gi,
+			"$1[redacted]",
+		)
+		.trim();
+}
+
+function discoveryFailedIssue(error: unknown, apiKey?: string): DroidModelFallbackIssue {
+	const rawErrorMessage = error instanceof Error ? error.message : String(error);
+	const errorMessage = scrubDiscoveryErrorText(rawErrorMessage, apiKey) || "unknown error";
+	const reason: DroidModelFallbackReason = rawErrorMessage.includes("ENOENT") || rawErrorMessage.includes("spawn")
 		? "droid-missing"
 		: "discovery-failed";
 	return {
@@ -264,7 +315,7 @@ export async function discoverModels(options: DiscoverModelsOptions = {}): Promi
 			await session.close();
 		}
 	} catch (error) {
-		options.onFallback?.(discoveryFailedIssue(error));
+		options.onFallback?.(discoveryFailedIssue(error, apiKey));
 		return registerMetadata(fallbackMetadataFromSnapshot());
 	}
 }
@@ -272,4 +323,5 @@ export async function discoverModels(options: DiscoverModelsOptions = {}): Promi
 export const __testUtils = {
 	registerMetadata,
 	clearMetadata: () => metadataByPiModelId.clear(),
+	scrubDiscoveryErrorText,
 };
