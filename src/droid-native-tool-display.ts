@@ -621,7 +621,7 @@ function renderDroidToolCall(
 	const data = args && typeof args === "object" ? args as Record<string, unknown> : {};
 	const droidToolName = typeof data.droidToolName === "string" ? data.droidToolName : toolName.replace(/^droid_/, "");
 	const mapped = normalizeDroidNativeToolName(droidToolName);
-	const title = toolName === DROID_NATIVE_TOOL_DISPLAY_TOOL_NAME ? `droid ${mapped}` : toolName.replace("_", " ");
+	const title = toolName === DROID_NATIVE_TOOL_DISPLAY_TOOL_NAME ? `droid ${mapped}` : toolName.replace(/_/g, " ");
 	if (mapped === "todo") {
 		const todoValue = data.todos ?? data.todo ?? data.items ?? data.input;
 		const renderedTodos = renderDroidTodoList(todoValue, theme, 8);

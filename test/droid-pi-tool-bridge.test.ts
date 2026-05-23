@@ -55,8 +55,8 @@ describe("droid pi tool bridge snapshots", () => {
 
 		const snapshot = buildDroidPiToolBridgeSnapshot(pi, { exposeOverlappingBuiltins: true });
 
-		expect(snapshot.tools.map((tool) => tool.piToolName)).toEqual(["read", "bash", "custom"]);
-		expect(snapshot.tools.map((tool) => tool.mcpToolName)).toEqual(["pi__read", "pi__bash", "pi__custom"]);
+		expect(snapshot.tools.map((tool) => tool.piToolName)).toEqual(["bash", "custom", "read"]);
+		expect(snapshot.tools.map((tool) => tool.mcpToolName)).toEqual(["pi__bash", "pi__custom", "pi__read"]);
 	});
 
 	it("uses stable collision-safe MCP names", () => {
@@ -71,6 +71,19 @@ describe("droid pi tool bridge snapshots", () => {
 		expect(snapshot.tools[0].mcpToolName).toBe("pi__tool_one");
 		expect(snapshot.tools[1].mcpToolName).toMatch(/^pi__tool_one__[a-f0-9]{8}$/);
 		expect(new Set(snapshot.tools.map((tool) => tool.mcpToolName)).size).toBe(2);
+	});
+
+	it("builds deterministic snapshots independent of registry order", () => {
+		const tools = [
+			createToolInfo("zeta", "Zeta", Type.Object({ z: Type.String() })),
+			createToolInfo("alpha", "Alpha", Type.Object({ a: Type.String() })),
+		];
+		const first = buildDroidPiToolBridgeSnapshot(createMockPi({ active: ["zeta", "alpha"], tools }));
+		const second = buildDroidPiToolBridgeSnapshot(createMockPi({ active: ["alpha", "zeta"], tools: [...tools].reverse() }));
+
+		expect(first.tools.map((tool) => tool.piToolName)).toEqual(["alpha", "zeta"]);
+		expect(second.tools.map((tool) => tool.piToolName)).toEqual(["alpha", "zeta"]);
+		expect(buildDroidPiToolBridgeSurfaceSignature(first)).toBe(buildDroidPiToolBridgeSurfaceSignature(second));
 	});
 
 	it("builds stable surface signatures for session compatibility checks", () => {

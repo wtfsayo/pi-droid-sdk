@@ -84,7 +84,7 @@ function formatMessage(msg: Message): string | undefined {
 	switch (msg.role) {
 		case "user": {
 			const text = formatContentBlocks(msg.content);
-			return text ? `User: ${text}` : undefined;
+			return `User: ${text || "[non-text content]"}`;
 		}
 		case "assistant": {
 			const blocks = Array.isArray(msg.content) ? msg.content : [{ type: "text" as const, text: String(msg.content) }];
@@ -98,7 +98,7 @@ function formatMessage(msg: Message): string | undefined {
 		case "toolResult": {
 			const text = formatContentBlocks(msg.content);
 			const label = msg.isError ? "Tool error" : "Tool result";
-			return `${label} (${msg.toolName}, call ${msg.toolCallId}): ${text}`;
+			return `${label} (${msg.toolName}, call ${msg.toolCallId}): ${text || "[no text content]"}`;
 		}
 	}
 }
@@ -110,6 +110,17 @@ function getLatestUserMessageIndex(messages: Message[]): number {
 	return -1;
 }
 
+function getRequiredMessageIndexes(messages: Message[]): Set<number> {
+	const required = new Set<number>();
+	const latestUserIndex = getLatestUserMessageIndex(messages);
+	if (latestUserIndex >= 0) required.add(latestUserIndex);
+	for (let index = messages.length - 1; index >= 0; index -= 1) {
+		if (messages[index].role !== "toolResult") break;
+		required.add(index);
+	}
+	return required;
+}
+
 function getSectionCost(section: string): number {
 	return section.length + SECTION_SEPARATOR.length;
 }
@@ -118,7 +129,7 @@ function applyPromptBudget(
 	sectionsBeforeMessages: string[],
 	messageSections: Array<{ index: number; text: string }>,
 	sectionsAfterMessages: string[],
-	latestUserMessageIndex: number,
+	requiredMessageIndexes: Set<number>,
 	options: DroidPromptOptions,
 ): string[] {
 	const maxInputTokens = options.maxInputTokens;
@@ -131,7 +142,7 @@ function applyPromptBudget(
 	const maxChars = Math.max(1, Math.floor(maxInputTokens * charsPerToken));
 	const imageBudgetChars = Math.floor(extractLatestImageCountFromSections(messageSections) * imageTokenEstimate * charsPerToken);
 	const effectiveMaxChars = Math.max(1, maxChars - imageBudgetChars);
-	const requiredMessageSections = messageSections.filter((section) => section.index === latestUserMessageIndex);
+	const requiredMessageSections = messageSections.filter((section) => requiredMessageIndexes.has(section.index));
 	const requiredCost = [...sectionsBeforeMessages, ...requiredMessageSections.map((section) => section.text), ...sectionsAfterMessages].reduce(
 		(total, section) => total + getSectionCost(section),
 		0,
@@ -214,7 +225,7 @@ export function buildDroidPrompt(context: Context, options: DroidPromptOptions =
 		});
 	}
 
-	const sections = applyPromptBudget(sectionsBeforeMessages, messageSections, [], latestUserIndex, options);
+	const sections = applyPromptBudget(sectionsBeforeMessages, messageSections, [], getRequiredMessageIndexes(messages), options);
 	const text = sections.join(SECTION_SEPARATOR);
 	return { text, images };
 }

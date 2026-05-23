@@ -32,6 +32,7 @@ import {
 	recordDroidNativeToolDisplay,
 	type DroidNativeToolDisplayItem,
 } from "./droid-native-tool-display.js";
+import { scrubSensitiveText } from "./redaction.js";
 
 const MISSING_API_KEY_MESSAGE =
 	"Factory API key required. Use /login (Use an API key -> Factory), set FACTORY_API_KEY, or pass --api-key.";
@@ -108,24 +109,6 @@ function resolveFactoryApiKey(optionsApiKey?: string): string | undefined {
 	if (trimmed && trimmed !== "FACTORY_API_KEY") return trimmed;
 	if (trimmed === "FACTORY_API_KEY") return process.env.FACTORY_API_KEY?.trim() || undefined;
 	return undefined;
-}
-
-function escapeRegExp(value: string): string {
-	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function scrubSensitiveText(text: string, apiKey?: string): string {
-	let scrubbed = text;
-	const trimmedKey = apiKey?.trim();
-	if (trimmedKey) scrubbed = scrubbed.replace(new RegExp(escapeRegExp(trimmedKey), "g"), "[redacted]");
-	return scrubbed
-		.replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
-		.replace(/((?:^|[\s,{])cookie["']?\s*[:=]\s*["']?)[^\n]+/gi, "$1[redacted]")
-		.replace(
-			/((?:authorization|api[_-]?key|apiKey|token|session(?:[_-]?id)?)['"]?\s*[:=]\s*['"]?)[^"'\s,;}]+/gi,
-			"$1[redacted]",
-		)
-		.trim();
 }
 
 function isGenericErrorMessage(message: string): boolean {

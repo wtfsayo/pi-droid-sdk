@@ -183,7 +183,8 @@ export function buildDroidPiToolBridgeSnapshot(
 	const piToolNameToMcpToolName = new Map<string, string>();
 	const tools: DroidPiToolBridgeSnapshotEntry[] = [];
 
-	for (const toolInfo of pi.getAllTools()) {
+	const allTools = [...pi.getAllTools()].sort((a, b) => a.name.localeCompare(b.name));
+	for (const toolInfo of allTools) {
 		if (!active.has(toolInfo.name)) continue;
 		if (isDroidNativeToolDisplayToolName(toolInfo.name)) continue;
 		if (toolInfo.name.startsWith(DROID_PI_BRIDGE_MCP_TOOL_PREFIX)) continue;

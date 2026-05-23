@@ -191,6 +191,17 @@ describe("buildDroidPrompt", () => {
 		expect(prompt.text).toContain("User: hello");
 	});
 
+	it("preserves image-only latest user turns with a placeholder", () => {
+		const context: Context = {
+			systemPrompt: "You are helpful.",
+			messages: [{ role: "user", content: [{ type: "image", data: "abc", mimeType: "image/png" }], timestamp: 1 }],
+		};
+		const prompt = buildDroidPrompt(context, { maxInputTokens: 10, charsPerToken: 1 });
+		expect(prompt.text).toContain("User: [image omitted from transcript]");
+		expect(prompt.text).toContain("Latest user turn includes 1 image");
+		expect(prompt.images).toEqual([{ data: "abc", mimeType: "image/png" }]);
+	});
+
 	it("budgets older transcript while preserving latest user turn", () => {
 		const context: Context = {
 			systemPrompt: "You are helpful.",
@@ -204,5 +215,19 @@ describe("buildDroidPrompt", () => {
 		expect(prompt.text).toContain("Earlier transcript omitted");
 		expect(prompt.text).toContain("User: latest request");
 		expect(prompt.text).not.toContain("old old old old old");
+	});
+
+	it("preserves trailing tool results under tight budget", () => {
+		const context: Context = {
+			systemPrompt: "You are helpful.",
+			messages: [
+				{ role: "user", content: "latest request", timestamp: 1 },
+				{ role: "assistant", content: [{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "README.md" } }], timestamp: 2 },
+				{ role: "toolResult", toolCallId: "call-1", toolName: "read", content: [{ type: "text", text: "important tool output ".repeat(20) }], timestamp: 3 },
+			],
+		};
+		const prompt = buildDroidPrompt(context, { maxInputTokens: 40, charsPerToken: 1 });
+		expect(prompt.text).toContain("User: latest request");
+		expect(prompt.text).toContain("Tool result (read, call call-1): important tool output");
 	});
 });
